@@ -101,7 +101,10 @@ async function main() {
   const allProducts = await prisma.product.findMany({ include: { variants: true } })
   
   // 6. Create Mock Orders
-  if (allProducts.length > 0) {
+  const p0 = allProducts[0]
+  const p4 = allProducts[4]
+
+  if (p0 && p4 && p0.variants[0] && p4.variants[1]) {
     await prisma.order.create({
       data: {
         userId: customer.id,
@@ -110,14 +113,14 @@ async function main() {
         items: {
           create: [
             { 
-              productId: allProducts[0].id, 
-              variantId: allProducts[0].variants[0].id,
+              productId: p0.id, 
+              variantId: p0.variants[0].id,
               quantity: 2, 
               price: 420000 
             },
             { 
-              productId: allProducts[4].id, 
-              variantId: allProducts[4].variants[1].id, // Size M
+              productId: p4.id, 
+              variantId: p4.variants[1].id, // Size M
               quantity: 1, 
               price: 350000 
             }
