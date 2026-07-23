@@ -146,7 +146,7 @@ async function main() {
             size,
             color: 'Đen',
             stock: 25,
-            sku: `FSH-${p.name.substring(0,3).toUpperCase()}-${size}`
+            sku: `FSH-${p.name.split(' ').map(w => w[0]).join('').toUpperCase()}-${size}`
           }))
         }
       }
