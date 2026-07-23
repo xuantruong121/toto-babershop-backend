@@ -44,6 +44,7 @@ async function main() {
   })
 
   // 3. Clean existing operational data safely
+  await prisma.promoCode.deleteMany({})
   await prisma.orderItem.deleteMany({})
   await prisma.order.deleteMany({})
   await prisma.productVariant.deleteMany({})
@@ -201,6 +202,27 @@ async function main() {
       }
     })
   }
+
+  // 7. Seed Promo Codes
+  await prisma.promoCode.createMany({
+    data: [
+      {
+        code: 'WELCOME10',
+        discountType: 'PERCENT',
+        discountValue: 10,
+        maxDiscount: 100000,
+        minOrderValue: 200000,
+        isActive: true
+      },
+      {
+        code: 'MINUS50K',
+        discountType: 'FIXED',
+        discountValue: 50000,
+        minOrderValue: 100000,
+        isActive: true
+      }
+    ]
+  })
 
   console.log('✅ Seeding completed successfully!')
 }
