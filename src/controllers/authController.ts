@@ -5,7 +5,10 @@ import crypto from 'crypto';
 import { prisma } from '../config/db.js';
 import { sendPasswordResetEmail } from '../services/emailService.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'toto-barbershop-super-secret-key-2026';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  throw new Error("Missing JWT_SECRET in environment variables");
+}
 
 export const register = async (req: Request, res: Response) => {
   try {

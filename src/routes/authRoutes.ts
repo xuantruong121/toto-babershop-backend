@@ -12,7 +12,15 @@ const forgotPasswordLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-router.post('/login', login);
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // limit each IP to 5 requests per windowMs
+  message: { error: 'Quá nhiều lần đăng nhập sai, vui lòng thử lại sau 15 phút' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+router.post('/login', loginLimiter, login);
 router.post('/register', register);
 router.post('/forgot-password', forgotPasswordLimiter, forgotPassword);
 router.post('/reset-password', resetPassword);
