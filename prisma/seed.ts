@@ -4,7 +4,7 @@ import bcrypt from 'bcrypt'
 const prisma = new PrismaClient()
 
 async function main() {
-  console.log('Seeding database...')
+  console.log('Seeding database with variants...')
 
   // 1. Create Admin User
   const adminPassword = await bcrypt.hash('admin123', 10)
@@ -31,35 +31,77 @@ async function main() {
     },
   })
 
-  // 3. Create Products (Grooming)
-  const groomingProducts = [
+  // 3. Delete existing products if any (to avoid variant conflicts)
+  await prisma.orderItem.deleteMany({})
+  await prisma.order.deleteMany({})
+  await prisma.productVariant.deleteMany({})
+  await prisma.product.deleteMany({})
+
+  // 4. Create Grooming Products (Single Variant)
+  const groomingData = [
     { name: 'Reuzel Pink Pomade', type: 'Grooming', category: 'Pomade', price: 420000, image: 'https://images.unsplash.com/photo-1599305090598-fe179d501227?q=80&w=600&auto=format&fit=crop' },
     { name: 'Kevin Murphy Rough Rider', type: 'Grooming', category: 'Clay', price: 650000, image: 'https://images.unsplash.com/photo-1626285861696-9f0bf5a49c6d?q=80&w=600&auto=format&fit=crop' },
     { name: 'O\'Douds Matte Paste', type: 'Grooming', category: 'Paste', price: 480000, image: 'https://images.unsplash.com/photo-1599305090598-fe179d501227?q=80&w=600&auto=format&fit=crop' },
     { name: 'Apestomen Volcanic Clay', type: 'Grooming', category: 'Clay', price: 340000, image: 'https://images.unsplash.com/photo-1626285861696-9f0bf5a49c6d?q=80&w=600&auto=format&fit=crop' },
   ]
 
-  // 4. Create Products (Merchandise)
-  const merchandiseProducts = [
-    { name: 'ToTo Classic Tee - Black', type: 'Fashion', category: 'Áo thun', price: 350000, image: 'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?q=80&w=600&auto=format&fit=crop' },
-    { name: 'ToTo Barber Apron', type: 'Fashion', category: 'Phụ kiện', price: 850000, image: 'https://images.unsplash.com/photo-1588667635678-831ddcd113ae?q=80&w=600&auto=format&fit=crop' },
-    { name: 'ToTo Premium Comb', type: 'Fashion', category: 'Phụ kiện', price: 150000, image: 'https://images.unsplash.com/photo-1621607512022-6aecc4fed814?q=80&w=600&auto=format&fit=crop' },
-  ]
-
-  // Insert all products if DB is empty
-  const productCount = await prisma.product.count()
-  let allProducts = await prisma.product.findMany()
-  
-  if (productCount === 0) {
-    for (const p of [...groomingProducts, ...merchandiseProducts]) {
-      await prisma.product.create({ data: p })
-    }
-    allProducts = await prisma.product.findMany()
+  for (const p of groomingData) {
+    await prisma.product.create({
+      data: {
+        ...p,
+        variants: {
+          create: [
+            { size: 'Tiêu chuẩn', color: null, stock: 50, sku: `GRM-${p.name.substring(0,3).toUpperCase()}-STD` }
+          ]
+        }
+      }
+    })
   }
 
-  // 5. Create Mock Orders
-  const orderCount = await prisma.order.count()
-  if (orderCount === 0 && allProducts.length > 0) {
+  // 5. Create Fashion Products (Multiple Variants)
+  const fashionData = [
+    { 
+      name: 'ToTo Classic Tee - Black', 
+      type: 'Fashion', 
+      category: 'Áo thun', 
+      price: 350000, 
+      image: 'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?q=80&w=600&auto=format&fit=crop',
+      description: 'Chiếc áo thun đen tối giản mang logo Toto Barbershop.'
+    },
+    { 
+      name: 'ToTo Premium Barber Apron', 
+      type: 'Fashion', 
+      category: 'Phụ kiện', 
+      price: 850000, 
+      image: 'https://images.unsplash.com/photo-1588667635678-831ddcd113ae?q=80&w=600&auto=format&fit=crop',
+      description: 'Tạp dề da thật pha canvas cao cấp.'
+    }
+  ]
+
+  for (const p of fashionData) {
+    const isShirt = p.category === 'Áo thun'
+    const sizes = isShirt ? ['S', 'M', 'L', 'XL'] : ['Freesize']
+    
+    await prisma.product.create({
+      data: {
+        ...p,
+        variants: {
+          create: sizes.map(size => ({
+            size,
+            color: 'Đen',
+            stock: 20,
+            sku: `FSH-${p.name.substring(0,3).toUpperCase()}-${size}`
+          }))
+        }
+      }
+    })
+  }
+
+  // Get products back to create orders
+  const allProducts = await prisma.product.findMany({ include: { variants: true } })
+  
+  // 6. Create Mock Orders
+  if (allProducts.length > 0) {
     await prisma.order.create({
       data: {
         userId: customer.id,
@@ -67,21 +109,18 @@ async function main() {
         status: 'COMPLETED',
         items: {
           create: [
-            { productId: allProducts[0].id, quantity: 2, price: 420000 },
-            { productId: allProducts[4].id, quantity: 1, price: 350000 }
-          ]
-        }
-      }
-    })
-    
-    await prisma.order.create({
-      data: {
-        userId: customer.id,
-        total: 850000,
-        status: 'PROCESSING',
-        items: {
-          create: [
-            { productId: allProducts[5].id, quantity: 1, price: 850000 }
+            { 
+              productId: allProducts[0].id, 
+              variantId: allProducts[0].variants[0].id,
+              quantity: 2, 
+              price: 420000 
+            },
+            { 
+              productId: allProducts[4].id, 
+              variantId: allProducts[4].variants[1].id, // Size M
+              quantity: 1, 
+              price: 350000 
+            }
           ]
         }
       }
