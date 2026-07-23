@@ -3,12 +3,14 @@ import jwt from 'jsonwebtoken';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'toto-barbershop-super-secret-key-2026';
 
+export interface UserPayload {
+  id: number;
+  email: string;
+  role: string;
+}
+
 export interface AuthRequest extends Request {
-  user?: {
-    id: number;
-    email: string;
-    role: string;
-  };
+  user?: UserPayload | undefined;
 }
 
 export const authenticateToken = (req: AuthRequest, res: Response, next: NextFunction) => {
@@ -19,11 +21,11 @@ export const authenticateToken = (req: AuthRequest, res: Response, next: NextFun
     return res.status(401).json({ error: 'Access token is required' });
   }
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
+  jwt.verify(token, JWT_SECRET, (err, decoded) => {
+    if (err || !decoded || typeof decoded === 'string') {
       return res.status(403).json({ error: 'Invalid or expired token' });
     }
-    req.user = user as AuthRequest['user'];
+    req.user = decoded as unknown as UserPayload;
     next();
   });
 };
