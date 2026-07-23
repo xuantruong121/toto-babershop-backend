@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import productRoutes from './routes/productRoutes.js';
 import orderRoutes from './routes/orderRoutes.js';
 import statsRoutes from './routes/statsRoutes.js';
@@ -7,12 +8,21 @@ import authRoutes from './routes/authRoutes.js';
 
 const app = express();
 
-app.use(cors());
+// Security HTTP Headers
+app.use(helmet());
+
+// CORS configuration
+app.use(cors({
+  origin: '*', // Customize for production
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
 
 // Health check
 app.get('/', (req, res) => {
-  res.send('Toto Barbershop API is running');
+  res.send('Toto Barbershop Secure API is running');
 });
 
 // API Routes
@@ -23,5 +33,5 @@ app.use('/api/auth', authRoutes);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`🔒 Server is running securely on port ${PORT}`);
 });

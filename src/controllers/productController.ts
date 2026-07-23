@@ -12,6 +12,30 @@ export const getProducts = async (req: Request, res: Response) => {
   }
 };
 
+export const searchProducts = async (req: Request, res: Response) => {
+  try {
+    const query = req.query.q as string;
+    if (!query) {
+      return res.json([]);
+    }
+
+    const products = await prisma.product.findMany({
+      where: {
+        OR: [
+          { name: { contains: query, mode: 'insensitive' } },
+          { category: { contains: query, mode: 'insensitive' } },
+          { description: { contains: query, mode: 'insensitive' } }
+        ]
+      },
+      include: { variants: true }
+    });
+
+    res.json(products);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to search products' });
+  }
+};
+
 export const createProduct = async (req: Request, res: Response) => {
   try {
     const { name, description, price, image, category, type } = req.body;
