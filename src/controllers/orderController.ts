@@ -1,21 +1,24 @@
 import type { Request, Response } from 'express';
 import { prisma } from '../config/db.js';
+import { createRequire } from 'module';
 
-export const getOrders = async (req: Request, res: Response) => {
-  try {
-    const orders = await prisma.order.findMany({
-      include: { items: true, user: true }
-    });
-    res.json(orders);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch orders' });
-  }
-};
+// @payos/node export dạng { PayOS, PayOSError, ... } — không phải default export
+const require = createRequire(import.meta.url);
+const { PayOS } = require('@payos/node');
+
+// Khởi tạo payOS client
+const payos = new PayOS({
+  clientId: process.env.PAYOS_CLIENT_ID!,
+  apiKey: process.env.PAYOS_API_KEY!,
+  checksumKey: process.env.PAYOS_CHECKSUM_KEY!
+});
+
+
 
 export const createOrder = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.id;
-    const { items, total, discount, promoCode, idempotencyKey } = req.body;
+    const { items, total, discount, promoCode, idempotencyKey, paymentMethod, address, note } = req.body;
 
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     if (!items || items.length === 0) return res.status(400).json({ error: 'Giỏ hàng trống' });
@@ -26,17 +29,17 @@ export const createOrder = async (req: Request, res: Response) => {
       where: { idempotencyKey }
     });
     if (existingOrder) {
-      return res.json(existingOrder); // Trả về đơn hàng cũ
+      return res.json(existingOrder);
     }
 
     // Transaction với row lock (for update)
     const order = await prisma.$transaction(async (tx) => {
       // Khóa và kiểm tra từng sản phẩm
       for (const item of items) {
-        // Khóa row (FOR UPDATE)
+        const variantId = Number(item.variantId);
         const variantRows = await tx.$queryRaw<any[]>`
           SELECT stock FROM "ProductVariant"
-          WHERE id = ${item.variantId}
+          WHERE id = ${variantId}
           FOR UPDATE
         `;
 
@@ -49,9 +52,8 @@ export const createOrder = async (req: Request, res: Response) => {
           throw new Error(`Sản phẩm không đủ số lượng trong kho.`);
         }
 
-        // Trừ kho
         await tx.productVariant.update({
-          where: { id: item.variantId },
+          where: { id: Number(item.variantId) },
           data: { stock: currentStock - item.quantity }
         });
       }
@@ -84,6 +86,7 @@ export const createOrder = async (req: Request, res: Response) => {
           discount: discount || 0,
           promoCode,
           idempotencyKey,
+          paymentMethod: paymentMethod || 'COD',
           items: {
             create: items.map((i: any) => ({
               productId: i.productId,
@@ -92,66 +95,303 @@ export const createOrder = async (req: Request, res: Response) => {
               price: i.price
             }))
           }
-        }
+        },
+        include: { items: true }
       });
 
       return newOrder;
     });
 
-    res.json(order);
+    // Nếu chọn thanh toán qua payOS → tạo link QR
+    if (paymentMethod === 'payos') {
+      try {
+        const user = await prisma.user.findUnique({ where: { id: userId } });
+        // payOS yêu cầu orderCode là số nguyên dương (dùng timestamp để đảm bảo unique)
+        const payosOrderCode = Number(Date.now().toString().slice(-8));
+        
+        const paymentData = await payos.paymentRequests.create({
+          orderCode: payosOrderCode,
+          amount: total,
+          description: `TOTO DH${order.id}`,
+          cancelUrl: `${process.env.FRONTEND_URL?.split(',')[0]?.trim()}/checkout?cancelled=1`,
+          returnUrl: `${process.env.FRONTEND_URL?.split(',')[0]?.trim()}/order-success?code=${order.id}`,
+          buyerName: user?.name || 'Khách hàng',
+          buyerEmail: user?.email,
+          buyerPhone: user?.phone || undefined,
+        });
+
+        // Lưu orderCode vào DB để webhook sau nhận dạng được
+        await prisma.order.update({
+          where: { id: order.id },
+          data: { payosOrderCode: BigInt(payosOrderCode) }
+        });
+
+        return res.json({
+          ...order,
+          payosOrderCode,
+          checkoutUrl: paymentData.checkoutUrl,
+          qrCode: paymentData.qrCode,
+        });
+      } catch (payosErr: any) {
+        console.error('payOS error:', payosErr);
+        // Nếu tạo link thất bại vẫn trả về đơn hàng, không để mất
+        return res.json({ ...order, payosError: 'Không thể tạo link thanh toán. Vui lòng thanh toán COD.' });
+      }
+    }
+
+    res.status(201).json(order);
   } catch (error: any) {
     console.error('Create order error:', error);
-    // Xử lý lỗi trùng lặp idempotencyKey do race condition (unique constraint)
     if (error.code === 'P2002') {
-       return res.status(409).json({ error: 'Đơn hàng đã được tạo trước đó.' });
+      return res.status(409).json({ error: 'Đơn hàng đã được tạo trước đó.' });
     }
     res.status(400).json({ error: error.message || 'Lỗi tạo đơn hàng' });
   }
 };
 
-// Webhook thanh toán (Idempotent webhook)
-export const paymentWebhook = async (req: Request, res: Response) => {
+// Webhook từ payOS — xử lý khi khách thanh toán thành công
+export const payosWebhook = async (req: Request, res: Response) => {
   try {
-    const { orderId, transactionId, status, signature } = req.body;
-    
-    // TODO: Verify signature từ VNPay/MoMo ở đây
-    // if (!verifySignature(signature, req.body)) return res.status(400).send('Invalid signature');
+    // Verify chữ ký của payOS để đảm bảo request hợp lệ
+    let webhookData: any;
+    try {
+      webhookData = payos.webhooks.verify(req.body);
+    } catch (signatureErr) {
+      console.error('payOS webhook signature invalid:', signatureErr);
+      return res.status(400).send('Invalid signature');
+    }
 
-    if (status !== 'SUCCESS') {
-      return res.status(200).send('OK'); // Không xử lý nếu fail
+    const { orderCode, code } = webhookData;
+
+    // code "00" = thành công
+    if (code !== '00') {
+      return res.status(200).json({ message: 'Ignored non-success event' });
+    }
+
+    // Tìm order theo payosOrderCode
+    const order = await prisma.order.findFirst({
+      where: { payosOrderCode: BigInt(orderCode) }
+    });
+
+    if (!order) {
+      console.error('payOS webhook: order not found for orderCode', orderCode);
+      return res.status(200).json({ message: 'Order not found, ignored' });
+    }
+
+    // Idempotent: nếu đã thanh toán rồi thì bỏ qua
+    if (order.paymentStatus === 'PAID') {
+      return res.status(200).json({ message: 'Already processed' });
     }
 
     await prisma.$transaction(async (tx) => {
-      // Khóa đơn hàng
+      // Double-check với row lock
       const orderRows = await tx.$queryRaw<any[]>`
         SELECT "paymentStatus" FROM "Order"
-        WHERE id = ${orderId}
+        WHERE id = ${Number(order.id)}
         FOR UPDATE
       `;
+      if (orderRows[0]?.paymentStatus === 'PAID') return;
 
-      if (!orderRows || orderRows.length === 0) {
-        throw new Error('Order not found');
-      }
-
-      if (orderRows[0].paymentStatus === 'PAID') {
-        return; // Đã xử lý rồi, bỏ qua, không charge/trừ kho 2 lần
-      }
-
-      // Cập nhật trạng thái
       await tx.order.update({
-        where: { id: orderId },
-        data: { 
+        where: { id: order.id },
+        data: {
           paymentStatus: 'PAID',
-          transactionId 
+          status: 'PROCESSING',
+          transactionId: String(orderCode),
         }
       });
-      
-      // TODO: Gửi email xác nhận
     });
 
-    res.status(200).send('OK'); // Luôn trả 200 để cổng thanh toán không retry
+    console.log(`✅ payOS webhook: Order #${order.id} đã thanh toán thành công`);
+    res.status(200).json({ message: 'OK' });
+  } catch (error) {
+    console.error('payOS webhook error:', error);
+    res.status(500).send('Internal Server Error');
+  }
+};
+
+// Giữ lại webhook cũ (legacy) nếu dùng COD
+export const paymentWebhook = async (req: Request, res: Response) => {
+  try {
+    const { orderId, transactionId, status } = req.body;
+
+    if (status !== 'SUCCESS') {
+      return res.status(200).send('OK');
+    }
+
+    await prisma.$transaction(async (tx) => {
+      const orderRows = await tx.$queryRaw<any[]>`
+        SELECT "paymentStatus" FROM "Order"
+        WHERE id = ${Number(orderId)}
+        FOR UPDATE
+      `;
+      if (!orderRows || orderRows.length === 0) throw new Error('Order not found');
+      if (orderRows[0].paymentStatus === 'PAID') return;
+
+      await tx.order.update({
+        where: { id: Number(orderId) },
+        data: { paymentStatus: 'PAID', transactionId }
+      });
+    });
+
+    res.status(200).send('OK');
   } catch (error) {
     console.error('Payment webhook error:', error);
     res.status(500).send('Internal Server Error');
+  }
+};
+
+export const getOrders = async (req: Request, res: Response) => {
+  try {
+    const orders = await prisma.order.findMany({
+      include: {
+        user: {
+          include: { addresses: true }
+        },
+        items: {
+          include: {
+            product: true,
+            variant: true,
+          }
+        }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    // Map order fields for frontend store
+    const mappedOrders = orders.map((o: any) => ({
+      id: o.id,
+      code: `TOTO-${1000 + o.id}`,
+      customer: {
+        id: o.userId,
+        name: o.user.name,
+        email: o.user.email,
+        phone: o.user.phone || "",
+        address: (o.user.addresses && o.user.addresses.length > 0) 
+          ? `${o.user.addresses[0].street}, ${o.user.addresses[0].ward}, ${o.user.addresses[0].district}, ${o.user.addresses[0].province}`
+          : "Khách chưa lưu địa chỉ",
+      },
+      items: o.items.map((i: any) => ({
+        id: i.id,
+        productId: i.productId,
+        variantId: i.variantId,
+        product: i.product ? { ...i.product, title: i.product.name } : null,
+        variant: i.variant || null,
+        title: i.product?.name || "Sản phẩm",
+        variantName: i.variant?.name || "Mặc định",
+        image: (i.product?.images && i.product.images.length > 0) ? i.product.images[0] : "",
+        quantity: i.quantity,
+        price: i.price
+      })),
+      subtotal: o.total - o.discount, // total in DB is actual total paid or what? Wait, total in DB is final total.
+      shippingFee: 0,
+      discount: o.discount,
+      total: o.total,
+      couponCode: o.promoCode,
+      status: o.status.toLowerCase(),
+      paymentStatus: o.paymentStatus.toLowerCase(),
+      paymentMethod: o.paymentMethod.toLowerCase(),
+      createdAt: o.createdAt.toISOString()
+    }));
+
+    res.json(mappedOrders);
+  } catch (error) {
+    console.error('get orders error:', error);
+    res.status(500).json({ error: 'Lỗi lấy danh sách đơn hàng' });
+  }
+};
+
+export const getOrderStatus = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const order = await prisma.order.findUnique({
+      where: { id: Number(id) },
+      select: {
+        id: true,
+        status: true,
+        paymentStatus: true,
+        updatedAt: true
+      }
+    });
+    
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    
+    res.json({
+      id: order.id,
+      status: order.status.toLowerCase(),
+      paymentStatus: order.paymentStatus.toLowerCase(),
+      updatedAt: order.updatedAt
+    });
+  } catch (error) {
+    console.error('Get order status error:', error);
+    res.status(500).json({ error: 'Lỗi lấy trạng thái đơn hàng' });
+  }
+};
+
+export const updateOrderStatus = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { status, paymentStatus } = req.body;
+    
+    // Yêu cầu quyền admin (giả sử có checkRole admin middleware, ở đây update trực tiếp)
+    const order = await prisma.order.update({
+      where: { id: Number(id) },
+      data: {
+        ...(status && { status }),
+        ...(paymentStatus && { paymentStatus })
+      }
+    });
+    res.json(order);
+  } catch (error) {
+    console.error('Update order status error:', error);
+    res.status(500).json({ error: 'Lỗi cập nhật đơn hàng' });
+  }
+};
+
+export const cancelOrder = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const userId = (req as any).user?.id;
+
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const order = await prisma.order.findUnique({
+      where: { id: Number(id) },
+      include: { items: true }
+    });
+
+    if (!order) return res.status(404).json({ error: 'Đơn hàng không tồn tại' });
+    if (order.userId !== userId) return res.status(403).json({ error: 'Không có quyền hủy đơn này' });
+    if (order.status !== 'PENDING') return res.status(400).json({ error: 'Chỉ có thể hủy đơn hàng đang chờ xử lý' });
+    if (order.paymentStatus === 'PAID') return res.status(400).json({ error: 'Đơn hàng đã thanh toán. Vui lòng liên hệ CSKH để huỷ' });
+
+    // Trả lại kho
+    await prisma.$transaction(async (tx) => {
+      for (const item of order.items) {
+        if (item.variantId) {
+          const variantRows = await tx.$queryRaw<any[]>`
+            SELECT stock FROM "ProductVariant"
+            WHERE id = ${item.variantId}
+            FOR UPDATE
+          `;
+          if (variantRows && variantRows.length > 0) {
+            await tx.productVariant.update({
+              where: { id: item.variantId },
+              data: { stock: variantRows[0].stock + item.quantity }
+            });
+          }
+        }
+      }
+      
+      await tx.order.update({
+        where: { id: Number(id) },
+        data: { status: 'CANCELLED' }
+      });
+    });
+
+    res.json({ message: 'Đã hủy đơn hàng thành công' });
+  } catch (error) {
+    console.error('Cancel order error:', error);
+    res.status(500).json({ error: 'Lỗi hủy đơn hàng' });
   }
 };

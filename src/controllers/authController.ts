@@ -176,3 +176,73 @@ export const resetPassword = async (req: Request, res: Response) => {
     res.status(500).json({ error: 'Failed to reset password' });
   }
 };
+
+export const getUsers = async (req: Request, res: Response) => {
+  try {
+    const users = await prisma.user.findMany({
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        phone: true,
+        role: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    const mappedUsers = users.map((u: any) => ({
+      id: u.id,
+      email: u.email,
+      name: u.name,
+      phone: u.phone,
+      role: u.role,
+      status: 'active', // Mock status since we don't have it
+      createdAt: u.createdAt.toISOString()
+    }));
+
+    res.json(mappedUsers);
+  } catch (error) {
+    console.error('getUsers error:', error);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+};
+
+export const createUser = async (req: Request, res: Response) => {
+  try {
+    const { email, password, name, phone, role } = req.body;
+
+    if (!email || !password || !name) {
+      return res.status(400).json({ error: 'Email, password, and name are required' });
+    }
+
+    const existingUser = await prisma.user.findUnique({ where: { email } });
+    if (existingUser) {
+      return res.status(400).json({ error: 'Email is already registered' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = await prisma.user.create({
+      data: {
+        email,
+        password: hashedPassword,
+        name,
+        phone,
+        role: role || 'CUSTOMER'
+      }
+    });
+
+    res.status(201).json({
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      phone: user.phone,
+      role: user.role,
+      status: 'active',
+      createdAt: user.createdAt.toISOString()
+    });
+  } catch (error) {
+    console.error('createUser error:', error);
+    res.status(500).json({ error: 'Failed to create user' });
+  }
+};

@@ -6,7 +6,16 @@ export const getProducts = async (req: Request, res: Response) => {
     const products = await prisma.product.findMany({
       include: { variants: true }
     });
-    res.json(products);
+    // Map data for frontend (e.g. name -> title)
+    const mappedProducts = products.map((p: any) => ({
+      ...p,
+      title: p.name,
+      seo: {
+        metaTitle: p.seoTitle,
+        metaDescription: p.seoDescription
+      }
+    }));
+    res.json(mappedProducts);
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch products' });
   }
