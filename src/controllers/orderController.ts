@@ -112,7 +112,7 @@ export const createOrder = async (req: Request, res: Response) => {
         const paymentData = await payos.paymentRequests.create({
           orderCode: payosOrderCode,
           amount: total,
-          description: `TOTO #${order.id}`,
+          description: `TOTO DH${order.id}`,
           cancelUrl: `${process.env.FRONTEND_URL?.split(',')[0]?.trim()}/checkout?cancelled=1`,
           returnUrl: `${process.env.FRONTEND_URL?.split(',')[0]?.trim()}/order-success?code=${order.id}`,
           buyerName: user?.name || 'Khách hàng',
@@ -245,7 +245,9 @@ export const getOrders = async (req: Request, res: Response) => {
   try {
     const orders = await prisma.order.findMany({
       include: {
-        user: true,
+        user: {
+          include: { addresses: true }
+        },
         items: {
           include: {
             product: true,
@@ -265,14 +267,19 @@ export const getOrders = async (req: Request, res: Response) => {
         name: o.user.name,
         email: o.user.email,
         phone: o.user.phone || "",
-        address: "", // Mock address for now
+        address: (o.user.addresses && o.user.addresses.length > 0) 
+          ? `${o.user.addresses[0].street}, ${o.user.addresses[0].ward}, ${o.user.addresses[0].district}, ${o.user.addresses[0].province}`
+          : "Khách chưa lưu địa chỉ",
       },
       items: o.items.map((i: any) => ({
         id: i.id,
         productId: i.productId,
         variantId: i.variantId,
-        product: { ...i.product, title: i.product.name },
-        variant: i.variant,
+        product: i.product ? { ...i.product, title: i.product.name } : null,
+        variant: i.variant || null,
+        title: i.product?.name || "Sản phẩm",
+        variantName: i.variant?.name || "Mặc định",
+        image: (i.product?.images && i.product.images.length > 0) ? i.product.images[0] : "",
         quantity: i.quantity,
         price: i.price
       })),
@@ -289,7 +296,102 @@ export const getOrders = async (req: Request, res: Response) => {
 
     res.json(mappedOrders);
   } catch (error) {
-    console.error('getOrders error:', error);
-    res.status(500).json({ error: 'Failed to fetch orders' });
+    console.error('get orders error:', error);
+    res.status(500).json({ error: 'Lỗi lấy danh sách đơn hàng' });
+  }
+};
+
+export const getOrderStatus = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const order = await prisma.order.findUnique({
+      where: { id: Number(id) },
+      select: {
+        id: true,
+        status: true,
+        paymentStatus: true,
+        updatedAt: true
+      }
+    });
+    
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    
+    res.json({
+      id: order.id,
+      status: order.status.toLowerCase(),
+      paymentStatus: order.paymentStatus.toLowerCase(),
+      updatedAt: order.updatedAt
+    });
+  } catch (error) {
+    console.error('Get order status error:', error);
+    res.status(500).json({ error: 'Lỗi lấy trạng thái đơn hàng' });
+  }
+};
+
+export const updateOrderStatus = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { status, paymentStatus } = req.body;
+    
+    // Yêu cầu quyền admin (giả sử có checkRole admin middleware, ở đây update trực tiếp)
+    const order = await prisma.order.update({
+      where: { id: Number(id) },
+      data: {
+        ...(status && { status }),
+        ...(paymentStatus && { paymentStatus })
+      }
+    });
+    res.json(order);
+  } catch (error) {
+    console.error('Update order status error:', error);
+    res.status(500).json({ error: 'Lỗi cập nhật đơn hàng' });
+  }
+};
+
+export const cancelOrder = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const userId = (req as any).user?.id;
+
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const order = await prisma.order.findUnique({
+      where: { id: Number(id) },
+      include: { items: true }
+    });
+
+    if (!order) return res.status(404).json({ error: 'Đơn hàng không tồn tại' });
+    if (order.userId !== userId) return res.status(403).json({ error: 'Không có quyền hủy đơn này' });
+    if (order.status !== 'PENDING') return res.status(400).json({ error: 'Chỉ có thể hủy đơn hàng đang chờ xử lý' });
+    if (order.paymentStatus === 'PAID') return res.status(400).json({ error: 'Đơn hàng đã thanh toán. Vui lòng liên hệ CSKH để huỷ' });
+
+    // Trả lại kho
+    await prisma.$transaction(async (tx) => {
+      for (const item of order.items) {
+        if (item.variantId) {
+          const variantRows = await tx.$queryRaw<any[]>`
+            SELECT stock FROM "ProductVariant"
+            WHERE id = ${item.variantId}
+            FOR UPDATE
+          `;
+          if (variantRows && variantRows.length > 0) {
+            await tx.productVariant.update({
+              where: { id: item.variantId },
+              data: { stock: variantRows[0].stock + item.quantity }
+            });
+          }
+        }
+      }
+      
+      await tx.order.update({
+        where: { id: Number(id) },
+        data: { status: 'CANCELLED' }
+      });
+    });
+
+    res.json({ message: 'Đã hủy đơn hàng thành công' });
+  } catch (error) {
+    console.error('Cancel order error:', error);
+    res.status(500).json({ error: 'Lỗi hủy đơn hàng' });
   }
 };
